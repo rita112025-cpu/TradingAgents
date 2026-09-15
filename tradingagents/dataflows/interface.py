@@ -18,6 +18,7 @@ from .errors import (
     VendorRateLimitError,
 )
 from .fred import get_macro_data as get_fred_macro_data
+from .mops import get_monthly_revenue as get_mops_monthly_revenue
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
@@ -74,7 +75,13 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_prediction_markets",
         ]
-    }
+    },
+    "taiwan_market_data": {
+        "description": "Taiwan-specific official filings (MOPS monthly revenue)",
+        "tools": [
+            "get_monthly_revenue",
+        ]
+    },
 }
 
 VENDOR_LIST = [
@@ -82,6 +89,7 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "mops",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -89,7 +97,9 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+# taiwan_market_data is supplementary operating evidence next to the audited
+# statements, so a MOPS outage degrades to a sentinel rather than aborting.
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "taiwan_market_data"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -140,6 +150,10 @@ VENDOR_METHODS = {
     # prediction_markets
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
+    },
+    # taiwan_market_data
+    "get_monthly_revenue": {
+        "mops": get_mops_monthly_revenue,
     },
 }
 
