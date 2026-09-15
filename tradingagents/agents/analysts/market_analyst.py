@@ -2,10 +2,23 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.utils.agent_utils import (
     get_indicators,
+    get_institutional_flows,
     get_instrument_context_from_state,
     get_language_instruction,
     get_stock_data,
     get_verified_market_snapshot,
+)
+from tradingagents.dataflows.config import get_config
+from tradingagents.dataflows.market_profiles import MARKET_TAIWAN, resolve_market
+
+# Added to the system message only for Taiwan-listed tickers, where the official
+# institutional flow tool is bound (see market_profiles).
+_TAIWAN_INSTITUTIONAL_FLOWS_GUIDANCE = (
+    "\n\nThis is a Taiwan-listed company: use the official institutional flow tool"
+    " (`get_institutional_flows`) for 三大法人 evidence. Figures are shares traded by each"
+    " investor group on completed trading days. A date or ticker missing from the official"
+    " table is missing data, not zero. Treat flows as positioning evidence to weigh with"
+    " price and volume, not as an automatic buy or sell signal."
 )
 
 
@@ -20,6 +33,14 @@ def create_market_analyst(llm):
             get_indicators,
             get_verified_market_snapshot,
         ]
+        # Market-specific supplementary tools come from the ticker's market
+        # profile so no exchange suffix is tested here.
+        is_taiwan = (
+            resolve_market(str(state.get("company_of_interest", "")), get_config())
+            == MARKET_TAIWAN
+        )
+        if is_taiwan:
+            tools.append(get_institutional_flows)
 
         system_message = (
             """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
@@ -52,6 +73,7 @@ Before writing the final report, call get_verified_market_snapshot for this tick
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
+            + (_TAIWAN_INSTITUTIONAL_FLOWS_GUIDANCE if is_taiwan else "")
             + get_language_instruction()
         )
 

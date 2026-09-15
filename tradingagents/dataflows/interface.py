@@ -18,7 +18,14 @@ from .errors import (
     VendorRateLimitError,
 )
 from .fred import get_macro_data as get_fred_macro_data
+from .mops import get_monthly_revenue as get_mops_monthly_revenue
+from .mops_announcements import (
+    get_material_announcements as get_mops_material_announcements,
+)
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
+from .taiwan_institutional_flows import (
+    get_institutional_flows as get_twse_tpex_institutional_flows,
+)
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -74,7 +81,22 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_prediction_markets",
         ]
-    }
+    },
+    "taiwan_market_data": {
+        "description": "Taiwan-specific official filings (MOPS monthly revenue, material announcements)",
+        "tools": [
+            "get_monthly_revenue",
+            "get_material_announcements",
+        ]
+    },
+    # A separate category from taiwan_market_data: its configured vendor is
+    # "mops", which cannot serve exchange trading data.
+    "taiwan_flow_data": {
+        "description": "Taiwan institutional investor flows (TWSE T86, TPEx daily trade)",
+        "tools": [
+            "get_institutional_flows",
+        ]
+    },
 }
 
 VENDOR_LIST = [
@@ -82,6 +104,8 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "mops",
+    "twse_tpex",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -89,7 +113,12 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+# taiwan_market_data is supplementary operating evidence next to the audited
+# statements, so a MOPS outage degrades to a sentinel rather than aborting.
+# taiwan_flow_data is supplementary positioning evidence next to prices.
+OPTIONAL_CATEGORIES = {
+    "macro_data", "prediction_markets", "taiwan_market_data", "taiwan_flow_data",
+}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -140,6 +169,17 @@ VENDOR_METHODS = {
     # prediction_markets
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
+    },
+    # taiwan_market_data
+    "get_monthly_revenue": {
+        "mops": get_mops_monthly_revenue,
+    },
+    "get_material_announcements": {
+        "mops": get_mops_material_announcements,
+    },
+    # taiwan_flow_data
+    "get_institutional_flows": {
+        "twse_tpex": get_twse_tpex_institutional_flows,
     },
 }
 
