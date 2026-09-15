@@ -18,7 +18,7 @@ import pytest
 import requests
 from langchain_core.messages import AIMessage
 
-from tradingagents.dataflows import interface, mops_announcements as ma, mops_common
+from tradingagents.dataflows import bounded_http, interface, mops_announcements as ma, taiwan_common
 from tradingagents.dataflows.errors import NoMarketDataError
 from tradingagents.dataflows.mops_common import MopsUnavailableError
 
@@ -32,7 +32,7 @@ _NAME = {"2330": "台積電", "6488": "環球晶"}
 
 
 def _taipei(iso: str) -> datetime:
-    return datetime.fromisoformat(iso).replace(tzinfo=mops_common.TAIPEI)
+    return datetime.fromisoformat(iso).replace(tzinfo=taiwan_common.TAIPEI)
 
 
 def _roc(iso_date: str) -> str:
@@ -556,7 +556,7 @@ class _FakeResponse:
 @pytest.mark.unit
 class HttpTests(unittest.TestCase):
     def _fails(self, msg_part, **kw):
-        with mock.patch.object(mops_common.requests, "post", **kw), \
+        with mock.patch.object(bounded_http.requests, "post", **kw), \
                 self.assertRaises(MopsUnavailableError) as ctx:
             _REAL_POST_JSON("t05st01", {"companyId": "2330"})
         self.assertIn(msg_part, str(ctx.exception))
@@ -578,22 +578,22 @@ class HttpTests(unittest.TestCase):
         self._fails("unexpected JSON shape", return_value=_FakeResponse(body=b"[1, 2]"))
 
     def test_oversized_body(self):
-        resp = _FakeResponse(body=b"x" * (mops_common.MAX_BODY_BYTES * 2))
+        resp = _FakeResponse(body=b"x" * (bounded_http.DEFAULT_MAX_BODY_BYTES * 2))
         self._fails("exceeded", return_value=resp)
-        self.assertLessEqual(resp.bytes_served, mops_common.MAX_BODY_BYTES + mops_common.CHUNK_BYTES)
+        self.assertLessEqual(resp.bytes_served, bounded_http.DEFAULT_MAX_BODY_BYTES + bounded_http.CHUNK_BYTES)
         self._fails("exceeded", return_value=_FakeResponse(
-            body=b"{}", headers={"Content-Length": str(mops_common.MAX_BODY_BYTES + 1)}))
+            body=b"{}", headers={"Content-Length": str(bounded_http.DEFAULT_MAX_BODY_BYTES + 1)}))
 
     def test_request_is_json_post_bounded_and_verified(self):
         resp = _FakeResponse(body=b'{"code": 200, "result": {}}')
-        with mock.patch.object(mops_common.requests, "post", return_value=resp) as post:
+        with mock.patch.object(bounded_http.requests, "post", return_value=resp) as post:
             self.assertEqual(_REAL_POST_JSON("t05st01", {"companyId": "2330"})["code"], 200)
         args, kwargs = post.call_args
         self.assertEqual(args[0], "https://mops.twse.com.tw/mops/api/t05st01")
         self.assertEqual(kwargs["json"], {"companyId": "2330"})
-        self.assertEqual(kwargs["timeout"], mops_common.TIMEOUT_SECONDS)
+        self.assertEqual(kwargs["timeout"], bounded_http.DEFAULT_TIMEOUT_SECONDS)
         self.assertTrue(kwargs["stream"])
-        self.assertEqual(kwargs["headers"]["User-Agent"], mops_common.USER_AGENT)
+        self.assertEqual(kwargs["headers"]["User-Agent"], bounded_http.DEFAULT_USER_AGENT)
         self.assertNotIn("verify", kwargs)
 
     def test_requests_are_spaced(self):

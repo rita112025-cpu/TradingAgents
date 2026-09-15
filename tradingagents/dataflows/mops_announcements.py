@@ -20,8 +20,8 @@ Source facts that shape the design (verified against the live API):
   Taiwan time). ``enterDate`` in the detail reference can differ from it and
   is never used for filtering.
 * The host certificate lacks a Subject Key Identifier (rejected by urllib's
-  strict mode on Python 3.13+); the shared transport in ``mops_common`` uses
-  ``requests`` with verification on.
+  strict mode on Python 3.13+); the shared bounded transport (``bounded_http``,
+  via ``mops_common``) uses ``requests`` with verification on.
 
 Point-in-time: a historical run knows only ``curr_date``, not the decision
 time, and MOPS publishes material announcements after the market close. A
@@ -43,12 +43,10 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from .mops_common import (
-    BOARD_MARKET_NAME,
+from .bounded_http import DEFAULT_TIMEOUT_SECONDS
+from .mops_common import BOARD_MARKET_NAME, MopsUnavailableError, http_post_json
+from .taiwan_common import (
     TAIPEI,
-    TIMEOUT_SECONDS,
-    MopsUnavailableError,
-    http_post_json,
     norm_header,
     split_taiwan_ticker,
     taipei_now as _now,  # test seam; the shared Taiwan-time clock
@@ -110,7 +108,7 @@ def _sleep(seconds: float) -> None:
 # HTTP
 # --------------------------------------------------------------------------
 
-def _post_json(api: str, body: dict, timeout: float = TIMEOUT_SECONDS) -> dict:
+def _post_json(api: str, body: dict, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
     """POST to a MOPS JSON API through the shared transport (test seam)."""
     return http_post_json(_API_BASE + api, body, timeout=timeout)
 

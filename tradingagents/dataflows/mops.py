@@ -14,8 +14,8 @@ Source facts that shape the design (verified against the live site):
   ``/nas/t21/{sii|otc}/t21sc03_{ROC year}_{month}_0.html`` (``_0`` = domestic
   companies). Plain GET, no cookies, no form fields, no API key.
 * The host's certificate lacks a Subject Key Identifier, which Python 3.13+'s
-  default strict X.509 mode in ``urllib`` rejects. The shared transport in
-  ``mops_common`` uses ``requests`` with verification left on.
+  default strict X.509 mode in ``urllib`` rejects. The shared bounded transport
+  (``bounded_http``, via ``mops_common``) uses ``requests`` with verification on.
 * Amounts are stated by the source in ``千元`` (TWD thousands); MoM / YoY /
   cumulative-YoY percentages are published by MOPS, not derived here.
 * A month's file appears as an empty template before anyone has filed and
@@ -46,6 +46,8 @@ from .errors import NoMarketDataError
 from .mops_common import (
     MopsUnavailableError,
     http_get as _http_get,  # test seam
+)
+from .taiwan_common import (
     norm_header,
     split_taiwan_ticker,
     taipei_now as _now,  # test seam; the shared Taiwan-time clock
@@ -57,7 +59,7 @@ _HOST = "https://mopsov.twse.com.tw"
 _TABLE_PATH = "/nas/t21/{board}/t21sc03_{roc_year}_{month}_0.html"
 _ENCODING = "cp950"                  # MOPS declares big5; cp950 is its superset
 
-# The board code comes from mops_common.split_taiwan_ticker (sii / otc) and is
+# The board code comes from taiwan_common.split_taiwan_ticker (sii / otc) and is
 # also the MOPS path segment for this table.
 _BOARD_LABEL = {"sii": "TWSE listed (上市)", "otc": "TPEx listed (上櫃)"}
 

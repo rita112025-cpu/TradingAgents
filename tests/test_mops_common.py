@@ -1,23 +1,29 @@
-"""Shared MOPS helpers (``mops_common``): both adapters use one transport,
-error type, header normalizer, board map, Taiwan ticker parser and clock."""
+"""MOPS adapter bindings: both MOPS adapters use the MOPS error type and the
+MOPS wrappers over ``bounded_http``, and take the Taiwan clock, ticker parser
+and label normalizer from ``taiwan_common`` rather than from ``mops_common``."""
 
 from __future__ import annotations
 
 import unittest
-from datetime import timedelta
 from unittest import mock
 
 import pytest
 
-from tradingagents.dataflows import mops, mops_announcements, mops_common
+from tradingagents.dataflows import (
+    bounded_http,
+    mops,
+    mops_announcements,
+    mops_common,
+    taiwan_common,
+)
 from tradingagents.dataflows.errors import NoMarketDataError
 
 
 @pytest.mark.unit
 class SharedBindingTests(unittest.TestCase):
     def test_both_adapters_use_the_shared_clock(self):
-        self.assertIs(mops._now, mops_common.taipei_now)
-        self.assertIs(mops_announcements._now, mops_common.taipei_now)
+        self.assertIs(mops._now, taiwan_common.taipei_now)
+        self.assertIs(mops_announcements._now, taiwan_common.taipei_now)
 
     def test_both_adapters_use_the_shared_error_type(self):
         self.assertIs(mops.MopsUnavailableError, mops_common.MopsUnavailableError)
@@ -32,8 +38,19 @@ class SharedBindingTests(unittest.TestCase):
             mops_announcements._post_json("t05st01", {"companyId": "2330"})
         post.assert_called_once_with(
             "https://mops.twse.com.tw/mops/api/t05st01", {"companyId": "2330"},
-            timeout=mops_common.TIMEOUT_SECONDS,
+            timeout=bounded_http.DEFAULT_TIMEOUT_SECONDS,
         )
+
+    def test_mops_common_does_not_re_export_generic_helpers(self):
+        for name in ("taipei_now", "TAIPEI", "split_taiwan_ticker", "norm_header",
+                     "BOARD_BY_SUFFIX", "USER_AGENT", "TIMEOUT_SECONDS", "MAX_BODY_BYTES",
+                     "CHUNK_BYTES", "requests"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(mops_common, name))
+
+    def test_board_market_names_cover_every_board(self):
+        self.assertEqual(set(taiwan_common.BOARD_BY_SUFFIX.values()),
+                         set(mops_common.BOARD_MARKET_NAME))
 
     def test_no_adapter_keeps_a_private_copy(self):
         for module in (mops, mops_announcements):
@@ -46,16 +63,12 @@ class SharedBindingTests(unittest.TestCase):
 
 @pytest.mark.unit
 class ClockTests(unittest.TestCase):
-    def test_taipei_now_is_utc_plus_eight(self):
-        now = mops_common.taipei_now()
-        self.assertEqual(now.utcoffset(), timedelta(hours=8))
-
     def test_monthly_revenue_today_follows_the_taiwan_clock(self):
         # 2026-09-15 00:30 in Taiwan is still 2026-09-14 in UTC. With the Taiwan
         # clock, curr_date 2026-09-14 is a historical run: August revenue (public
         # only from 09-16) is withheld and only July is requested. A UTC or
         # system-date clock would call it live and request August too.
-        taiwan_after_midnight = mops_common.taipei_now().replace(
+        taiwan_after_midnight = taiwan_common.taipei_now().replace(
             year=2026, month=9, day=15, hour=0, minute=30, second=0, microsecond=0)
         with mock.patch.object(mops, "_now", lambda: taiwan_after_midnight), \
                 mock.patch.object(mops, "_fetch_table") as fetch:
@@ -63,26 +76,3 @@ class ClockTests(unittest.TestCase):
             with self.assertRaises(NoMarketDataError):
                 mops.get_monthly_revenue("2330.TW", "2026-09-14", look_back_months=2)
         fetch.assert_called_once_with("sii", 2026, 7)
-
-
-@pytest.mark.unit
-class TickerParsingTests(unittest.TestCase):
-    def test_board_and_code(self):
-        cases = {"2330.TW": ("2330", "sii"), "2330.tw": ("2330", "sii"),
-                 "6488.TWO": ("6488", "otc"), " 5274.two ": ("5274", "otc")}
-        for ticker, expected in cases.items():
-            with self.subTest(ticker=ticker):
-                self.assertEqual(mops_common.split_taiwan_ticker(ticker, "X"), expected)
-
-    def test_refusals_name_the_source_and_are_unqueried(self):
-        for ticker in ("AAPL", "7203.T", "0700.HK", "", "ABCD.TW"):
-            with self.subTest(ticker=ticker), self.assertRaises(NoMarketDataError) as ctx:
-                mops_common.split_taiwan_ticker(ticker, "MOPS something")
-            self.assertIn("not queried", str(ctx.exception))
-        with self.assertRaises(NoMarketDataError) as ctx:
-            mops_common.split_taiwan_ticker("AAPL", "MOPS material announcements")
-        self.assertIn("MOPS material announcements is only available", str(ctx.exception))
-
-    def test_board_maps_are_consistent(self):
-        self.assertEqual(set(mops_common.BOARD_BY_SUFFIX.values()),
-                         set(mops_common.BOARD_MARKET_NAME))
