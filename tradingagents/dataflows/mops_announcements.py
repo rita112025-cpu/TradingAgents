@@ -20,7 +20,8 @@ Source facts that shape the design (verified against the live API):
   Taiwan time). ``enterDate`` in the detail reference can differ from it and
   is never used for filtering.
 * The host certificate lacks a Subject Key Identifier (rejected by urllib's
-  strict mode on Python 3.13+), so ``requests`` is used with verification on.
+  strict mode on Python 3.13+); the shared transport in ``mops_common`` uses
+  ``requests`` with verification on.
 
 Point-in-time: a historical run knows only ``curr_date``, not the decision
 time, and MOPS publishes material announcements after the market close. A
@@ -36,26 +37,21 @@ same-day withheld (historical runs).
 from __future__ import annotations
 
 import calendar
-import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
-import requests
-
-from .errors import NoMarketDataError
-from .market_profiles import MARKET_TAIWAN, resolve_market
-from .mops import (
-    _BOARD_BY_SUFFIX,
-    _CHUNK_BYTES,
-    _MAX_BODY_BYTES,
-    _TIMEOUT,
-    _UA,
+from .mops_common import (
+    BOARD_MARKET_NAME,
+    TAIPEI,
+    TIMEOUT_SECONDS,
     MopsUnavailableError,
-    _norm_header,
-    _too_large,
+    http_post_json,
+    norm_header,
+    split_taiwan_ticker,
+    taipei_now as _now,  # test seam; the shared Taiwan-time clock
 )
 
 logger = logging.getLogger(__name__)
@@ -63,12 +59,6 @@ logger = logging.getLogger(__name__)
 _API_BASE = "https://mops.twse.com.tw/mops/api/"
 _LIST_API = "t05st01"
 _DETAIL_API = "t05st01_detail"
-
-# Taiwan has used UTC+8 without daylight saving since 1979; a fixed offset
-# avoids depending on a tz database (absent on Windows without tzdata).
-_TAIPEI = timezone(timedelta(hours=8), "Asia/Taipei")
-
-_BOARD_MARKET_NAME = {"sii": "上市公司", "otc": "上櫃公司"}
 
 _MAX_LOOK_BACK_DAYS = 90       # bounds the number of monthly list requests
 _MAX_DETAIL_LIMIT = 5          # bounds detail requests and prompt size
@@ -112,11 +102,6 @@ class MopsBoardMismatchError(MopsUnavailableError):
     """
 
 
-def _now() -> datetime:
-    """Current Taiwan time. Tests patch this instead of relying on the clock."""
-    return datetime.now(_TAIPEI)
-
-
 def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
@@ -125,48 +110,9 @@ def _sleep(seconds: float) -> None:
 # HTTP
 # --------------------------------------------------------------------------
 
-def _post_json(api: str, body: dict, timeout: float = _TIMEOUT) -> dict:
-    """POST ``body`` as JSON to a MOPS API and return the decoded envelope.
-
-    Any transport error, non-200 status, oversized body, or non-object JSON
-    raises :class:`MopsUnavailableError`.
-    """
-    url = _API_BASE + api
-    try:
-        resp = requests.post(
-            url,
-            json=body,
-            headers={"User-Agent": _UA, "Accept": "application/json"},
-            timeout=timeout,
-            stream=True,
-        )
-    except requests.RequestException as exc:  # timeout, DNS, TLS, connection reset
-        raise MopsUnavailableError(f"MOPS fetch failed ({type(exc).__name__}) for {url}") from exc
-
-    with resp:
-        if resp.status_code != 200:
-            raise MopsUnavailableError(f"MOPS fetch failed (HTTP {resp.status_code}) for {url}")
-        declared = resp.headers.get("Content-Length", "")
-        if declared.isdigit() and int(declared) > _MAX_BODY_BYTES:
-            raise _too_large(url)
-        raw = bytearray()
-        try:
-            for chunk in resp.iter_content(_CHUNK_BYTES):
-                raw.extend(chunk)
-                if len(raw) > _MAX_BODY_BYTES:
-                    raise _too_large(url)
-        except requests.RequestException as exc:  # connection dropped mid-body
-            raise MopsUnavailableError(
-                f"MOPS fetch failed ({type(exc).__name__}) for {url}"
-            ) from exc
-
-    try:
-        envelope = json.loads(bytes(raw).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise MopsUnavailableError(f"MOPS returned malformed JSON for {url}") from exc
-    if not isinstance(envelope, dict):
-        raise MopsUnavailableError(f"MOPS returned an unexpected JSON shape for {url}")
-    return envelope
+def _post_json(api: str, body: dict, timeout: float = TIMEOUT_SECONDS) -> dict:
+    """POST to a MOPS JSON API through the shared transport (test seam)."""
+    return http_post_json(_API_BASE + api, body, timeout=timeout)
 
 
 class _Client:
@@ -212,7 +158,7 @@ def _title_map(api: str, titles, required: dict[str, str], optional: dict[str, s
             raise MopsUnavailableError(
                 f"MOPS {api} layout mismatch: title {title['main']!r} has sub-columns"
             )
-        positions.setdefault(_norm_header(title["main"]), []).append(index)
+        positions.setdefault(norm_header(title["main"]), []).append(index)
 
     mapping: dict[str, int] = {}
     for key, label in (required | optional).items():
@@ -239,7 +185,7 @@ def _check_company(api: str, result: dict, code: str, board: str) -> str:
             f"MOPS {api} layout mismatch: companyId {company!r} does not match {code!r}"
         )
     market = str(result.get("marketName", "")).strip()
-    expected = _BOARD_MARKET_NAME[board]
+    expected = BOARD_MARKET_NAME[board]
     if market != expected:
         raise MopsBoardMismatchError(
             f"MOPS reports company {code} as {market or '<missing>'}, but the ticker "
@@ -264,7 +210,7 @@ def _timestamp(api: str, date_text, time_text) -> datetime:
         if not t:
             raise ValueError(time_text)
         return datetime(d.year, d.month, d.day, int(t.group(1)), int(t.group(2)),
-                        int(t.group(3)), tzinfo=_TAIPEI)
+                        int(t.group(3)), tzinfo=TAIPEI)
     except ValueError as exc:
         raise MopsUnavailableError(
             f"MOPS {api} returned an unparseable timestamp {date_text!r} {time_text!r}"
@@ -399,27 +345,6 @@ def _fetch_detail(client: _Client, ann: _Announcement, code: str, board: str) ->
 # Window
 # --------------------------------------------------------------------------
 
-def _split_ticker(ticker: str) -> tuple[str, str]:
-    """``2330.TW`` -> (``"2330"``, ``"sii"``); non-Taiwan tickers raise, unqueried."""
-    symbol = (ticker or "").strip().upper()
-    if resolve_market(symbol) != MARKET_TAIWAN:
-        raise NoMarketDataError(
-            ticker, detail="MOPS material announcements cover Taiwan-listed tickers "
-                           "(.TW / .TWO) only; not queried",
-        )
-    for suffix, board in _BOARD_BY_SUFFIX.items():
-        if symbol.endswith(suffix):
-            code = symbol[: -len(suffix)]
-            if re.fullmatch(r"\d{4,6}", code):
-                return code, board
-            raise NoMarketDataError(
-                ticker, detail=f"{code!r} is not a numeric MOPS company code; not queried",
-            )
-    raise NoMarketDataError(
-        ticker, detail="Taiwan ticker without a MOPS board suffix (.TW/.TWO); not queried",
-    )
-
-
 def _month_requests(start: date, end: date, code: str) -> list[dict]:
     """One list request per calendar month covering ``[start, end]``."""
     bodies = []
@@ -484,7 +409,7 @@ def get_material_announcements(
     retrieved or validated. A failed detail request only marks that
     announcement's detail unavailable.
     """
-    code, board = _split_ticker(ticker)
+    code, board = split_taiwan_ticker(ticker, "MOPS material announcements")
     try:
         as_of = datetime.strptime(curr_date, "%Y-%m-%d").date()
     except (TypeError, ValueError) as exc:
@@ -492,7 +417,7 @@ def get_material_announcements(
     look_back_days = min(max(1, int(look_back_days)), _MAX_LOOK_BACK_DAYS)
     detail_limit = min(max(0, int(detail_limit)), _MAX_DETAIL_LIMIT)
 
-    now = _now().astimezone(_TAIPEI)
+    now = _now().astimezone(TAIPEI)
     today = now.date()
     live = as_of >= today
     if live:
@@ -510,7 +435,7 @@ def get_material_announcements(
         if result is None:
             continue
         rows = _parse_list(result, code, board)
-        confirmed_market = _BOARD_MARKET_NAME[board]
+        confirmed_market = BOARD_MARKET_NAME[board]
         announcements.extend(rows)
 
     # Client-side point-in-time filter on the publication timestamp (never
@@ -529,7 +454,7 @@ def get_material_announcements(
 
     header = [
         f"# Material Announcements (MOPS 重大訊息, official filings) for {ticker.strip().upper()} "
-        f"(MOPS company code {code}, expected board {_BOARD_MARKET_NAME[board]})",
+        f"(MOPS company code {code}, expected board {BOARD_MARKET_NAME[board]})",
         f"# Point-in-time as of: {curr_date}",
         "# Source: MOPS 歷史重大訊息 API (POST https://mops.twse.com.tw/mops/api/t05st01; "
         "detail via t05st01_detail)",

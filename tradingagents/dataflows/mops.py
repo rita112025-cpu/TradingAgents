@@ -14,9 +14,8 @@ Source facts that shape the design (verified against the live site):
   ``/nas/t21/{sii|otc}/t21sc03_{ROC year}_{month}_0.html`` (``_0`` = domestic
   companies). Plain GET, no cookies, no form fields, no API key.
 * The host's certificate lacks a Subject Key Identifier, which Python 3.13+'s
-  default strict X.509 mode in ``urllib`` rejects. ``requests`` (already a
-  dependency, used by the FRED / Polymarket / Alpha Vantage adapters) verifies
-  it normally, so the adapter uses ``requests`` with verification left on.
+  default strict X.509 mode in ``urllib`` rejects. The shared transport in
+  ``mops_common`` uses ``requests`` with verification left on.
 * Amounts are stated by the source in ``千元`` (TWD thousands); MoM / YoY /
   cumulative-YoY percentages are published by MOPS, not derived here.
 * A month's file appears as an empty template before anyone has filed and
@@ -43,26 +42,23 @@ import unicodedata
 from datetime import date, datetime
 from html.parser import HTMLParser
 
-import requests
-
-from .errors import NoMarketDataError, VendorError
-from .market_profiles import MARKET_TAIWAN, resolve_market
-from .utils import get_current_date
+from .errors import NoMarketDataError
+from .mops_common import (
+    MopsUnavailableError,
+    http_get as _http_get,  # test seam
+    norm_header,
+    split_taiwan_ticker,
+    taipei_now as _now,  # test seam; the shared Taiwan-time clock
+)
 
 logger = logging.getLogger(__name__)
 
 _HOST = "https://mopsov.twse.com.tw"
 _TABLE_PATH = "/nas/t21/{board}/t21sc03_{roc_year}_{month}_0.html"
-_UA = "tradingagents/0.4 (+https://github.com/TauricResearch/TradingAgents)"
-_TIMEOUT = 20.0
-_MAX_BODY_BYTES = 4 * 1024 * 1024   # live files are ~0.4-0.5 MB
-_CHUNK_BYTES = 64 * 1024
 _ENCODING = "cp950"                  # MOPS declares big5; cp950 is its superset
 
-# Yahoo suffix -> MOPS board directory. Taiwan detection itself is the market
-# profile's job (resolve_market); this only maps a known-Taiwan suffix to the
-# MOPS path segment.
-_BOARD_BY_SUFFIX = {".TW": "sii", ".TWO": "otc"}
+# The board code comes from mops_common.split_taiwan_ticker (sii / otc) and is
+# also the MOPS path segment for this table.
 _BOARD_LABEL = {"sii": "TWSE listed (上市)", "otc": "TPEx listed (上櫃)"}
 
 # Statutory filing deadline: revenue for month M is due by the 10th of M+1
@@ -75,7 +71,7 @@ _HISTORICAL_PUBLIC_FROM_DAY = 16
 
 # Columns are located by their header label, never by position. Keys are the
 # fields the adapter emits; values are the leaf header labels exactly as the
-# live t21sc03 tables print them (after _norm_header), identical across every
+# live t21sc03 tables print them (after norm_header), identical across every
 # sii and otc industry table. Each required label must resolve to exactly one
 # single-column header cell or the whole table is rejected.
 _REQUIRED_COLUMNS = {
@@ -97,55 +93,6 @@ _OPTIONAL_COLUMNS = {
 }
 _UNIT_RE = re.compile(r"單位[：:]\s*([^\s<]+)")
 _ROC_DATE_RE = re.compile(r"出表日期[：:]\s*(\d{2,3})/(\d{2})/(\d{2})")
-
-
-class MopsUnavailableError(VendorError):
-    """MOPS could not be read (HTTP failure, oversized body, or layout change)."""
-
-
-# --------------------------------------------------------------------------
-# HTTP
-# --------------------------------------------------------------------------
-
-def _too_large(url: str) -> MopsUnavailableError:
-    return MopsUnavailableError(
-        f"MOPS response exceeded {_MAX_BODY_BYTES} bytes for {url}; refusing to parse"
-    )
-
-
-def _http_get(url: str, timeout: float = _TIMEOUT) -> bytes:
-    """GET ``url`` and return the body; any non-200 or transport error raises.
-
-    The body is streamed and abandoned as soon as it passes the size cap, so an
-    unexpectedly huge response is never fully downloaded or parsed.
-    """
-    try:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": _UA, "Accept": "text/html"},
-            timeout=timeout,
-            stream=True,
-        )
-    except requests.RequestException as exc:  # timeout, DNS, TLS, connection reset
-        raise MopsUnavailableError(f"MOPS fetch failed ({type(exc).__name__}) for {url}") from exc
-
-    with resp:
-        if resp.status_code != 200:
-            raise MopsUnavailableError(f"MOPS fetch failed (HTTP {resp.status_code}) for {url}")
-        declared = resp.headers.get("Content-Length", "")
-        if declared.isdigit() and int(declared) > _MAX_BODY_BYTES:
-            raise _too_large(url)
-        body = bytearray()
-        try:
-            for chunk in resp.iter_content(_CHUNK_BYTES):
-                body.extend(chunk)
-                if len(body) > _MAX_BODY_BYTES:
-                    raise _too_large(url)
-        except requests.RequestException as exc:  # connection dropped mid-body
-            raise MopsUnavailableError(
-                f"MOPS fetch failed ({type(exc).__name__}) for {url}"
-            ) from exc
-    return bytes(body)
 
 
 def _table_url(board: str, year: int, month: int) -> str:
@@ -272,14 +219,6 @@ class _TableCollector(HTMLParser):
             self.tables.append(table)
 
 
-def _norm_header(label: str) -> str:
-    """Minimal header normalization: NFKC (full-width -> half-width, NBSP ->
-    space) and removal of all whitespace. The labels are CJK, where whitespace
-    only comes from HTML formatting. No fuzzy matching: labels compare exactly.
-    """
-    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", label))
-
-
 def _grid(rows: list[list[_Cell]]) -> list[dict[int, tuple[_Cell, bool]]]:
     """Expand rowspan/colspan: grid[r][c] = (cell, starts_in_row_r)."""
     grid: list[dict[int, tuple[_Cell, bool]]] = [{} for _ in rows]
@@ -307,7 +246,7 @@ def _column_map(header_row: dict[int, tuple[_Cell, bool]]) -> dict[str, int]:
         if entry is None:
             entry = (cell, [])
             seen[id(cell)] = entry
-            by_label.setdefault(_norm_header(cell.text), []).append(entry)
+            by_label.setdefault(norm_header(cell.text), []).append(entry)
         entry[1].append(col)
 
     def resolve(label: str, required: bool) -> int | None:
@@ -365,7 +304,7 @@ def _extract_rows(tables: list[_Table]) -> dict[str, dict[str, str]]:
         for r in range(len(table.rows)):
             cells = grid[r]
             if any(
-                _norm_header(cell.text) in _REQUIRED_LABELS
+                norm_header(cell.text) in _REQUIRED_LABELS
                 for cell, starts in cells.values()
                 if starts and cell.is_header
             ):
@@ -481,27 +420,6 @@ def _public_from(year: int, month: int) -> date:
     return date(ny, nm, _HISTORICAL_PUBLIC_FROM_DAY)
 
 
-def _split_ticker(ticker: str) -> tuple[str, str]:
-    """``2330.TW`` -> (``"2330"``, ``"sii"``); raises for non-Taiwan input."""
-    symbol = (ticker or "").strip().upper()
-    if resolve_market(symbol) != MARKET_TAIWAN:
-        raise NoMarketDataError(
-            ticker, detail="MOPS monthly revenue covers Taiwan-listed tickers "
-                           "(.TW / .TWO) only; not queried",
-        )
-    for suffix, board in _BOARD_BY_SUFFIX.items():
-        if symbol.endswith(suffix):
-            code = symbol[: -len(suffix)]
-            if re.fullmatch(r"\d{4,6}", code):
-                return code, board
-            raise NoMarketDataError(
-                ticker, detail=f"{code!r} is not a numeric MOPS company code; not queried",
-            )
-    raise NoMarketDataError(
-        ticker, detail="Taiwan ticker without a MOPS board suffix (.TW/.TWO); not queried",
-    )
-
-
 # --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
@@ -526,13 +444,13 @@ def get_monthly_revenue(ticker: str, curr_date: str, look_back_months: int = 12)
     request) and when no month has a row for the company; raises
     :class:`MopsUnavailableError` on any transport, size, or layout problem.
     """
-    code, board = _split_ticker(ticker)
+    code, board = split_taiwan_ticker(ticker, "MOPS monthly revenue")
     try:
         as_of = datetime.strptime(curr_date, "%Y-%m-%d").date()
     except (TypeError, ValueError) as exc:
         raise ValueError(f"curr_date must be yyyy-mm-dd, got {curr_date!r}") from exc
     look_back_months = max(1, int(look_back_months))
-    today = datetime.strptime(get_current_date(), "%Y-%m-%d").date()
+    today = _now().date()   # Taiwan date, shared with the other MOPS adapters
     historical = as_of < today
 
     latest_year, latest_month = _month_add(as_of.year, as_of.month, -1)

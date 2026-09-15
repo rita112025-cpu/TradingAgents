@@ -13,16 +13,22 @@ column order) exercises the header-label column mapping.
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 from unittest import mock
 
 import pytest
 import requests
 from langchain_core.messages import AIMessage
 
-from tradingagents.dataflows import interface, mops
+from tradingagents.dataflows import interface, mops, mops_common
 from tradingagents.dataflows.errors import NoMarketDataError
 
 _TODAY = "2026-09-15"
+
+
+def _taipei_noon(iso_date):
+    """A Taiwan-time "now" on ``iso_date`` for the adapter's clock seam."""
+    return datetime.fromisoformat(f"{iso_date} 12:00:00").replace(tzinfo=mops_common.TAIPEI)
 _REAL_HTTP_GET = mops._http_get  # setUp replaces mops._http_get with a stub
 
 
@@ -71,7 +77,7 @@ def _cells(row, labels):
     for raw_label in labels:
         # Look values up by the normalised label so full-width header variants
         # still render the same row; unknown labels get "x".
-        label = mops._norm_header(raw_label)
+        label = mops_common.norm_header(raw_label)
         value = row.get(label, "x")
         if label == "公司代號":
             out.append(f"<td align=center>{value}</td>")
@@ -157,7 +163,7 @@ class _Server:
     def add(self, board, year, month, body):
         self.pages[mops._table_url(board, year, month)] = body
 
-    def __call__(self, url, timeout=mops._TIMEOUT):
+    def __call__(self, url, timeout=mops_common.TIMEOUT_SECONDS):
         self.requests.append(url)
         page = self.pages.get(url)
         if page is None:
@@ -174,7 +180,7 @@ class _Base(unittest.TestCase):
         self.server = _Server()
         self._patches = [
             mock.patch.object(mops, "_http_get", self.server),
-            mock.patch.object(mops, "get_current_date", return_value=_TODAY),
+            mock.patch.object(mops, "_now", lambda: _taipei_noon(_TODAY)),
         ]
         for p in self._patches:
             p.start()
@@ -189,10 +195,10 @@ class _Base(unittest.TestCase):
 
 class TickerTests(_Base):
     def test_tw_and_two_map_to_company_code_and_board(self):
-        self.assertEqual(mops._split_ticker("2330.TW"), ("2330", "sii"))
-        self.assertEqual(mops._split_ticker("2330.tw"), ("2330", "sii"))
-        self.assertEqual(mops._split_ticker("6488.TWO"), ("6488", "otc"))
-        self.assertEqual(mops._split_ticker("5274.two"), ("5274", "otc"))
+        self.assertEqual(mops_common.split_taiwan_ticker("2330.TW", "MOPS monthly revenue"), ("2330", "sii"))
+        self.assertEqual(mops_common.split_taiwan_ticker("2330.tw", "MOPS monthly revenue"), ("2330", "sii"))
+        self.assertEqual(mops_common.split_taiwan_ticker("6488.TWO", "MOPS monthly revenue"), ("6488", "otc"))
+        self.assertEqual(mops_common.split_taiwan_ticker("5274.two", "MOPS monthly revenue"), ("5274", "otc"))
 
     def test_non_taiwan_tickers_are_refused_without_a_request(self):
         for ticker in ("AAPL", "7203.T", "0700.HK", "SHOP.TO", "BRK.B", ""):
@@ -366,9 +372,9 @@ class HeaderMappingTests(_Base):
 
     def test_header_normalization_is_exact_not_fuzzy(self):
         # full-width punctuation / spaces and <br> splits normalise to the live label...
-        self.assertEqual(mops._norm_header("前期比較<br>增減（％）".replace("<br>", "")), "前期比較增減(%)")
-        self.assertEqual(mops._norm_header(" 公司\u3000代號\n"), "公司代號")
-        self.assertEqual(mops._norm_header("上月比較\xa0增減(%)"), "上月比較增減(%)")
+        self.assertEqual(mops_common.norm_header("前期比較<br>增減（％）".replace("<br>", "")), "前期比較增減(%)")
+        self.assertEqual(mops_common.norm_header(" 公司\u3000代號\n"), "公司代號")
+        self.assertEqual(mops_common.norm_header("上月比較\xa0增減(%)"), "上月比較增減(%)")
         fullwidth = tuple(
             {"公司代號": "公司　代號", "上月比較增減(%)": "上月比較增減（％）"}.get(x, x)
             for x in _LIVE_LABELS
@@ -427,7 +433,7 @@ class PointInTimeTests(_Base):
 
     def test_historical_run_after_buffer_day_serves_the_month(self):
         # Pretend today is later so 2026-09-16 counts as historical.
-        with mock.patch.object(mops, "get_current_date", return_value="2026-12-01"):
+        with mock.patch.object(mops, "_now", lambda: _taipei_noon("2026-12-01")):
             self._serve_three_months()
             out = mops.get_monthly_revenue("2330.TW", "2026-09-16", look_back_months=2)
         self.assertIn("| 2026-08 | 280,000,000 |", out)
@@ -489,21 +495,21 @@ class FailureTests(_Base):
 
     def _real_get(self, **fake):
         resp = _FakeResponse(**fake)
-        with mock.patch.object(mops.requests, "get", return_value=resp), \
+        with mock.patch.object(mops_common.requests, "get", return_value=resp), \
                 self.assertRaises(mops.MopsUnavailableError) as ctx:
             _REAL_HTTP_GET("https://mopsov.twse.com.tw/x")
         return str(ctx.exception), resp
 
     def test_oversized_streamed_body_is_abandoned_at_the_cap(self):
-        big = b"x" * (mops._MAX_BODY_BYTES * 3)
+        big = b"x" * (mops_common.MAX_BODY_BYTES * 3)
         msg, resp = self._real_get(body=big)
         self.assertIn("exceeded", msg)
         # Stopped shortly after the cap instead of downloading all 12 MB.
-        self.assertLessEqual(resp.bytes_served, mops._MAX_BODY_BYTES + mops._CHUNK_BYTES)
+        self.assertLessEqual(resp.bytes_served, mops_common.MAX_BODY_BYTES + mops_common.CHUNK_BYTES)
 
     def test_oversized_declared_length_is_refused_without_reading(self):
         msg, resp = self._real_get(
-            body=b"<html></html>", headers={"Content-Length": str(mops._MAX_BODY_BYTES + 1)}
+            body=b"<html></html>", headers={"Content-Length": str(mops_common.MAX_BODY_BYTES + 1)}
         )
         self.assertIn("exceeded", msg)
         self.assertEqual(resp.bytes_served, 0)
@@ -522,19 +528,19 @@ class FailureTests(_Base):
         )
         for exc, name in cases:
             with self.subTest(exc=name), \
-                    mock.patch.object(mops.requests, "get", side_effect=exc), \
+                    mock.patch.object(mops_common.requests, "get", side_effect=exc), \
                     self.assertRaises(mops.MopsUnavailableError) as ctx:
                 _REAL_HTTP_GET("https://mopsov.twse.com.tw/x")
             self.assertIn(name, str(ctx.exception))
 
     def test_request_is_bounded_and_identified(self):
         resp = _FakeResponse(body=b"ok")
-        with mock.patch.object(mops.requests, "get", return_value=resp) as get:
+        with mock.patch.object(mops_common.requests, "get", return_value=resp) as get:
             self.assertEqual(_REAL_HTTP_GET("https://mopsov.twse.com.tw/x"), b"ok")
         kwargs = get.call_args.kwargs
-        self.assertEqual(kwargs["timeout"], mops._TIMEOUT)
+        self.assertEqual(kwargs["timeout"], mops_common.TIMEOUT_SECONDS)
         self.assertTrue(kwargs["stream"])
-        self.assertEqual(kwargs["headers"]["User-Agent"], mops._UA)
+        self.assertEqual(kwargs["headers"]["User-Agent"], mops_common.USER_AGENT)
         self.assertNotIn("verify", kwargs)  # TLS verification stays at the default (on)
 
 
