@@ -19,6 +19,9 @@ from .errors import (
 )
 from .fred import get_macro_data as get_fred_macro_data
 from .mops import get_monthly_revenue as get_mops_monthly_revenue
+from .mops_announcements import (
+    get_material_announcements as get_mops_material_announcements,
+)
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
@@ -77,9 +80,10 @@ TOOLS_CATEGORIES = {
         ]
     },
     "taiwan_market_data": {
-        "description": "Taiwan-specific official filings (MOPS monthly revenue)",
+        "description": "Taiwan-specific official filings (MOPS monthly revenue, material announcements)",
         "tools": [
             "get_monthly_revenue",
+            "get_material_announcements",
         ]
     },
 }
@@ -154,6 +158,9 @@ VENDOR_METHODS = {
     # taiwan_market_data
     "get_monthly_revenue": {
         "mops": get_mops_monthly_revenue,
+    },
+    "get_material_announcements": {
+        "mops": get_mops_material_announcements,
     },
 }
 

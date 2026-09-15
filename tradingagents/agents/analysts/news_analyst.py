@@ -5,8 +5,22 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
     get_macro_indicators,
+    get_material_announcements,
     get_news,
     get_prediction_markets,
+)
+from tradingagents.dataflows.config import get_config
+from tradingagents.dataflows.market_profiles import MARKET_TAIWAN, resolve_market
+
+# Added to the system message only for Taiwan-listed tickers, where the
+# official MOPS material announcements tool is bound (see market_profiles).
+_TAIWAN_MATERIAL_ANNOUNCEMENTS_GUIDANCE = (
+    " This is a Taiwan-listed company: use the official material announcements tool"
+    " (`get_material_announcements`) when available. Distinguish an announcement's"
+    " publication timestamp (發言日期/發言時間) from the event date it reports"
+    " (事實發生日). Do not treat withheld, unavailable, or missing announcement data"
+    " as evidence that no material events occurred. Material announcements are"
+    " evidence to weigh, not automatically bullish or bearish."
 )
 
 
@@ -23,10 +37,19 @@ def create_news_analyst(llm):
             get_macro_indicators,
             get_prediction_markets,
         ]
+        # Market-specific supplementary tools come from the ticker's market
+        # profile so no exchange suffix is tested here.
+        is_taiwan = (
+            resolve_market(str(state.get("company_of_interest", "")), get_config())
+            == MARKET_TAIWAN
+        )
+        if is_taiwan:
+            tools.append(get_material_announcements)
 
         system_message = (
             f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(ticker, start_date, end_date) for {asset_label}-specific news by ticker symbol, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
+            + (_TAIWAN_MATERIAL_ANNOUNCEMENTS_GUIDANCE if is_taiwan else "")
             + get_language_instruction()
         )
 
