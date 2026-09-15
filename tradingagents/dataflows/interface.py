@@ -23,6 +23,9 @@ from .mops_announcements import (
     get_material_announcements as get_mops_material_announcements,
 )
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
+from .taiwan_institutional_flows import (
+    get_institutional_flows as get_twse_tpex_institutional_flows,
+)
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -86,6 +89,14 @@ TOOLS_CATEGORIES = {
             "get_material_announcements",
         ]
     },
+    # A separate category from taiwan_market_data: its configured vendor is
+    # "mops", which cannot serve exchange trading data.
+    "taiwan_flow_data": {
+        "description": "Taiwan institutional investor flows (TWSE T86, TPEx daily trade)",
+        "tools": [
+            "get_institutional_flows",
+        ]
+    },
 }
 
 VENDOR_LIST = [
@@ -94,6 +105,7 @@ VENDOR_LIST = [
     "polymarket",
     "alpha_vantage",
     "mops",
+    "twse_tpex",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -103,7 +115,10 @@ VENDOR_LIST = [
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
 # taiwan_market_data is supplementary operating evidence next to the audited
 # statements, so a MOPS outage degrades to a sentinel rather than aborting.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "taiwan_market_data"}
+# taiwan_flow_data is supplementary positioning evidence next to prices.
+OPTIONAL_CATEGORIES = {
+    "macro_data", "prediction_markets", "taiwan_market_data", "taiwan_flow_data",
+}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -161,6 +176,10 @@ VENDOR_METHODS = {
     },
     "get_material_announcements": {
         "mops": get_mops_material_announcements,
+    },
+    # taiwan_flow_data
+    "get_institutional_flows": {
+        "twse_tpex": get_twse_tpex_institutional_flows,
     },
 }
 

@@ -21,6 +21,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_income_statement,
     get_indicators,
     get_insider_transactions,
+    get_institutional_flows,
     get_macro_indicators,
     get_material_announcements,
     get_monthly_revenue,
@@ -222,6 +223,10 @@ class TradingAgentsGraph:
                     # LLM and required by its prompt; must be executable here or
                     # the call fails and the model reports it "unavailable").
                     get_verified_market_snapshot,
+                    # Taiwan-only (TWSE/TPEx institutional flows). Executable
+                    # here for every run; the analyst binds it only when the
+                    # ticker's market profile is Taiwan.
+                    get_institutional_flows,
                 ]
             ),
             "social": ToolNode(
