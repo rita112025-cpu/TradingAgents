@@ -22,6 +22,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_indicators,
     get_insider_transactions,
     get_macro_indicators,
+    get_monthly_revenue,
     get_news,
     get_prediction_markets,
     get_stock_data,
@@ -245,6 +246,10 @@ class TradingAgentsGraph:
                     get_balance_sheet,
                     get_cashflow,
                     get_income_statement,
+                    # Taiwan-only (MOPS monthly revenue). Executable here for
+                    # every run; the analyst binds it only when the ticker's
+                    # market profile is Taiwan, so other markets never see it.
+                    get_monthly_revenue,
                 ]
             ),
         }

@@ -77,3 +77,23 @@ def get_income_statement(
         str: A formatted report containing income statement data
     """
     return route_to_vendor("get_income_statement", ticker, freq, curr_date)
+
+
+@tool
+def get_monthly_revenue(
+    ticker: Annotated[str, "Taiwan-listed ticker symbol with exchange suffix, e.g. 2330.TW or 6488.TWO"],
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"],
+    look_back_months: Annotated[int, "number of most recent months to return (max 24)"] = 12,
+) -> str:
+    """
+    Retrieve the official MOPS monthly operating revenue filings for a
+    Taiwan-listed company (.TW / .TWO), point-in-time as of curr_date.
+    Monthly revenue is unaudited operating evidence, not a financial statement.
+    Args:
+        ticker (str): Taiwan-listed ticker symbol, e.g. 2330.TW
+        curr_date (str): Current date you are trading at, yyyy-mm-dd
+        look_back_months (int): Number of most recent months to return (default 12, max 24)
+    Returns:
+        str: A formatted table of monthly revenue with MoM / YoY / cumulative figures
+    """
+    return route_to_vendor("get_monthly_revenue", ticker, curr_date, look_back_months)
