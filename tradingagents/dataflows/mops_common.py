@@ -3,8 +3,8 @@
 Generic behaviour lives elsewhere: HTTP limits and streaming in
 ``bounded_http``, and the Taiwan clock, board mapping, ticker parsing and label
 normalization in ``taiwan_common``. What remains here is MOPS's own vocabulary:
-its error type and transport wrappers that raise that error with the
-``MOPS`` message prefix.
+its error type, the market names MOPS reports per board, and transport
+wrappers that raise that error with the ``MOPS`` message prefix.
 """
 
 from __future__ import annotations
@@ -13,6 +13,10 @@ from .bounded_http import DEFAULT_TIMEOUT_SECONDS, bounded_request, decode_json_
 from .errors import VendorError
 
 _SOURCE = "MOPS"
+
+# The market name MOPS reports for each board code.
+BOARD_MARKET_NAME = {"sii": "上市公司", "otc": "上櫃公司"}
+
 
 class MopsUnavailableError(VendorError):
     """MOPS could not be read (HTTP failure, oversized body, or layout change)."""

@@ -58,3 +58,23 @@ def get_insider_transactions(
         str: A report of insider transaction data
     """
     return route_to_vendor("get_insider_transactions", ticker)
+
+
+@tool
+def get_material_announcements(
+    ticker: Annotated[str, "Taiwan-listed ticker symbol with exchange suffix, e.g. 2330.TW or 6488.TWO"],
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"],
+    look_back_days: Annotated[int, "days of announcements to look back (max 90)"] = 30,
+) -> str:
+    """
+    Retrieve official MOPS material announcements (重大訊息) for a Taiwan-listed
+    company (.TW / .TWO), point-in-time as of curr_date. Each announcement has
+    its publication date/time; full detail is included for the newest few.
+    Args:
+        ticker (str): Taiwan-listed ticker symbol, e.g. 2330.TW
+        curr_date (str): Current date you are trading at, yyyy-mm-dd
+        look_back_days (int): Days to look back (default 30, max 90)
+    Returns:
+        str: A formatted list of announcements with timestamps, subjects and details
+    """
+    return route_to_vendor("get_material_announcements", ticker, curr_date, look_back_days)
