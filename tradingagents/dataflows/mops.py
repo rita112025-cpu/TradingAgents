@@ -35,11 +35,13 @@ returns partial numbers or raw HTML to the agent.
 
 from __future__ import annotations
 
-import functools
 import logging
 import re
+import threading
+import time
 import unicodedata
-from datetime import date, datetime
+from collections import OrderedDict
+from datetime import date
 from html.parser import HTMLParser
 
 from .errors import NoMarketDataError
@@ -49,6 +51,7 @@ from .mops_common import (
 )
 from .taiwan_common import (
     norm_header,
+    resolve_as_of,
     split_taiwan_ticker,
     taipei_now as _now,  # test seam; the shared Taiwan-time clock
 )
@@ -70,6 +73,16 @@ _BOARD_LABEL = {"sii": "TWSE listed (上市)", "otc": "TPEx listed (上櫃)"}
 # treats month M as public only from the 16th of M+1.
 _FILING_DEADLINE_DAY = 10
 _HISTORICAL_PUBLIC_FROM_DAY = 16
+
+# look_back_months is an LLM-supplied tool argument and each month is one
+# whole-board table request, so it is capped (two years covers YoY context).
+_MAX_LOOK_BACK_MONTHS = 24
+
+# A month's table keeps filling in until its filing deadline has safely passed,
+# so only months past that point are cached, and even those are re-fetched
+# after the TTL so a long-lived process picks up later corrections.
+_TABLE_CACHE_MAX = 64
+_COMPLETE_TABLE_TTL_SECONDS = 12 * 60 * 60
 
 # Columns are located by their header label, never by position. Keys are the
 # fields the adapter emits; values are the leaf header labels exactly as the
@@ -101,15 +114,40 @@ def _table_url(board: str, year: int, month: int) -> str:
     return _HOST + _TABLE_PATH.format(board=board, roc_year=year - 1911, month=month)
 
 
-@functools.lru_cache(maxsize=64)
+_cache_lock = threading.Lock()
+_table_cache: OrderedDict[tuple[str, int, int], tuple[float, _ParsedTable]] = OrderedDict()
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
 def _fetch_table(board: str, year: int, month: int) -> _ParsedTable:
-    """Download and parse one board-month table (cached for the process)."""
+    """Download and parse one board-month table.
+
+    Tables for months whose filing deadline has safely passed (see
+    :func:`_public_from`) are cached for ``_COMPLETE_TABLE_TTL_SECONDS``; a
+    month that may still be receiving filings is always fetched again.
+    """
+    key = (board, year, month)
+    with _cache_lock:
+        entry = _table_cache.get(key)
+        if entry is not None and _monotonic() - entry[0] < _COMPLETE_TABLE_TTL_SECONDS:
+            _table_cache.move_to_end(key)
+            return entry[1]
     url = _table_url(board, year, month)
     body = _http_get(url)
     try:
-        return _parse_table(body)
+        table = _parse_table(body)
     except MopsUnavailableError as exc:
         raise MopsUnavailableError(f"{exc} ({url})") from None
+    if _public_from(year, month) <= _now().date():
+        with _cache_lock:
+            _table_cache[key] = (_monotonic(), table)
+            _table_cache.move_to_end(key)
+            while len(_table_cache) > _TABLE_CACHE_MAX:
+                _table_cache.popitem(last=False)
+    return table
 
 
 # --------------------------------------------------------------------------
@@ -437,23 +475,22 @@ def _fmt_pct(v: float | None) -> str:
 def get_monthly_revenue(ticker: str, curr_date: str, look_back_months: int = 12) -> str:
     """Official MOPS monthly revenue for a Taiwan-listed ticker, point-in-time.
 
-    Returns a markdown report of up to ``look_back_months`` months ending with
-    the last calendar month before ``curr_date`` (the current month can never
-    be complete). For a historical run (``curr_date`` before today) months
-    whose statutory deadline had not safely passed are withheld and named.
+    Returns a markdown report of up to ``look_back_months`` (1-24) months
+    ending with the last calendar month before ``curr_date`` (the current month
+    can never be complete). For a historical run (``curr_date`` before today)
+    months whose statutory deadline had not safely passed are withheld and
+    named.
 
     Raises :class:`NoMarketDataError` for non-Taiwan tickers (without any
     request) and when no month has a row for the company; raises
-    :class:`MopsUnavailableError` on any transport, size, or layout problem.
+    :class:`MopsUnavailableError` on any transport, size, or layout problem,
+    and ``ValueError`` for a malformed or future ``curr_date``.
     """
     code, board = split_taiwan_ticker(ticker, "MOPS monthly revenue")
-    try:
-        as_of = datetime.strptime(curr_date, "%Y-%m-%d").date()
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"curr_date must be yyyy-mm-dd, got {curr_date!r}") from exc
-    look_back_months = max(1, int(look_back_months))
-    today = _now().date()   # Taiwan date, shared with the other MOPS adapters
-    historical = as_of < today
+    today = _now().date()   # Taiwan date, shared with the other Taiwan adapters
+    as_of, live = resolve_as_of(curr_date, today)
+    historical = not live
+    look_back_months = min(max(1, int(look_back_months)), _MAX_LOOK_BACK_MONTHS)
 
     latest_year, latest_month = _month_add(as_of.year, as_of.month, -1)
     candidates = [_month_add(latest_year, latest_month, -i) for i in range(look_back_months)]
@@ -551,5 +588,6 @@ def get_monthly_revenue(ticker: str, curr_date: str, look_back_months: int = 12)
 
 
 def clear_cache() -> None:
-    """Drop cached MOPS tables (tests, or a long-lived process crossing a filing day)."""
-    _fetch_table.cache_clear()
+    """Drop cached MOPS tables (tests, or a long-lived process)."""
+    with _cache_lock:
+        _table_cache.clear()

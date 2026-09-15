@@ -83,7 +83,7 @@ def get_income_statement(
 def get_monthly_revenue(
     ticker: Annotated[str, "Taiwan-listed ticker symbol with exchange suffix, e.g. 2330.TW or 6488.TWO"],
     curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"],
-    look_back_months: Annotated[int, "number of most recent months to return"] = 12,
+    look_back_months: Annotated[int, "number of most recent months to return (max 24)"] = 12,
 ) -> str:
     """
     Retrieve the official MOPS monthly operating revenue filings for a
@@ -92,7 +92,7 @@ def get_monthly_revenue(
     Args:
         ticker (str): Taiwan-listed ticker symbol, e.g. 2330.TW
         curr_date (str): Current date you are trading at, yyyy-mm-dd
-        look_back_months (int): Number of most recent months to return (default 12)
+        look_back_months (int): Number of most recent months to return (default 12, max 24)
     Returns:
         str: A formatted table of monthly revenue with MoM / YoY / cumulative figures
     """

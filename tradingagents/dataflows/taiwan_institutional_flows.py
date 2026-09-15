@@ -43,12 +43,13 @@ import time
 import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from .bounded_http import bounded_request, decode_json_object
 from .errors import NoMarketDataError, VendorError
 from .taiwan_common import (
     norm_header,
+    resolve_as_of,
     split_taiwan_ticker,
     taipei_now as _now,  # test seam; the shared Taiwan-time clock
 )
@@ -303,9 +304,14 @@ def _fetch_tpex(trade_date: date) -> _Table | None:
 # Cache and request pacing
 # --------------------------------------------------------------------------
 
-_lock = threading.Lock()
+_lock = threading.Lock()             # guards _cache and _last_request_done
 _cache: OrderedDict[tuple[str, str], _Table] = OrderedDict()
 _last_request_done: dict[str, float] = {}
+# One lock per exchange, held from the cache re-check through the wait, the
+# request, and the bookkeeping, so concurrent runs cannot send two requests to
+# the same exchange inside the spacing. TWSE and TPEx do not block each other.
+# Lock order is always board lock, then _lock.
+_board_locks = {"sii": threading.Lock(), "otc": threading.Lock()}
 
 
 def clear_cache() -> None:
@@ -321,27 +327,40 @@ def _load_table(board: str, trade_date: date, today: date) -> _Table | None:
     "no table" replies are always fetched again.
     """
     key = (board, trade_date.isoformat())
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+    with _board_locks[board]:
+        # Another run may have fetched this table while we waited for the lock.
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        with _lock:
+            last = _last_request_done.get(board)
+        if last is not None:
+            wait = _REQUEST_SPACING_SECONDS[board] - (_monotonic() - last)
+            if wait > 0:
+                _sleep(wait)
+        try:
+            table = (_fetch_twse if board == "sii" else _fetch_tpex)(trade_date)
+        finally:
+            with _lock:
+                _last_request_done[board] = _monotonic()
+        if table is not None and trade_date < today:
+            with _lock:
+                _cache[key] = table
+                _cache.move_to_end(key)
+                while len(_cache) > _CACHE_MAX_TABLES:
+                    _cache.popitem(last=False)
+        return table
+
+
+def _cache_get(key: tuple[str, str]) -> _Table | None:
     with _lock:
-        if key in _cache:
+        table = _cache.get(key)
+        if table is not None:
             _cache.move_to_end(key)
-            return _cache[key]
-        last = _last_request_done.get(board)
-    if last is not None:
-        wait = _REQUEST_SPACING_SECONDS[board] - (_monotonic() - last)
-        if wait > 0:
-            _sleep(wait)
-    try:
-        table = (_fetch_twse if board == "sii" else _fetch_tpex)(trade_date)
-    finally:
-        with _lock:
-            _last_request_done[board] = _monotonic()
-    if table is not None and trade_date < today:
-        with _lock:
-            _cache[key] = table
-            _cache.move_to_end(key)
-            while len(_cache) > _CACHE_MAX_TABLES:
-                _cache.popitem(last=False)
-    return table
+        return table
 
 
 # --------------------------------------------------------------------------
@@ -408,18 +427,13 @@ def get_institutional_flows(
     Raises :class:`NoMarketDataError` for non-Taiwan or non-numeric tickers
     (without any request) and when no supported table exists in the window;
     raises :class:`TaiwanExchangeUnavailableError` when a table cannot be
-    retrieved or fails validation.
+    retrieved or fails validation, and ``ValueError`` for a malformed or future
+    ``curr_date``.
     """
     code, board = split_taiwan_ticker(ticker, _TOOL_SOURCE)
-    try:
-        as_of = datetime.strptime(curr_date, "%Y-%m-%d").date()
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"curr_date must be yyyy-mm-dd, got {curr_date!r}") from exc
+    today = _now().date()
+    as_of, live = resolve_as_of(curr_date, today)
     wanted = min(max(1, int(look_back_trading_days)), _MAX_LOOK_BACK)
-
-    now = _now()
-    today = now.date()
-    live = as_of >= today
     floor = _SUPPORTED_FROM[board]
     source = _SOURCE_LABEL[board]
 

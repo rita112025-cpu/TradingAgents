@@ -12,6 +12,8 @@ returns for a CSV request on a day without a table.
 from __future__ import annotations
 
 import json
+import threading
+import time
 import unittest
 from datetime import date, datetime
 from unittest import mock
@@ -615,3 +617,95 @@ class MarketAnalystWiringTests(unittest.TestCase):
         tools = TradingAgentsGraph._create_tool_nodes(None)["market"].tools_by_name
         for name in _DEFAULT_MARKET_TOOLS + ["get_institutional_flows"]:
             self.assertIn(name, tools)
+
+
+# --- hardening: future dates and concurrent runs ------------------------------------------------
+
+class FutureDateTests(_Base):
+    def test_future_curr_date_is_refused_without_requests(self):
+        self.NOW = "2026-09-15 12:00:00"
+        with self.assertRaises(ValueError) as ctx:
+            self.run_tool("2330.TW", "2026-10-01", n=1)
+        self.assertIn("future dates are not supported", str(ctx.exception))
+        self.assertEqual(self.ex.calls, [])
+
+
+@pytest.mark.unit
+class ConcurrencyTests(unittest.TestCase):
+    """Real threads and a real clock with short spacing: the per-exchange lock
+    must serialize requests to one exchange without blocking the other."""
+
+    SPACING = 0.08
+    FETCH_SECONDS = 0.10
+    TODAY = date(2026, 9, 20)
+
+    def setUp(self):
+        flows.clear_cache()
+        flows._last_request_done.clear()
+        self.events = []                       # (board, start, end)
+        self.events_lock = threading.Lock()
+        self.inflight = {"sii": 0, "otc": 0, "all": 0}
+        self.max_inflight = {"sii": 0, "otc": 0, "all": 0}
+
+        def fake_fetch(board):
+            def fetch(day):
+                with self.events_lock:
+                    for key in (board, "all"):
+                        self.inflight[key] += 1
+                        self.max_inflight[key] = max(self.max_inflight[key], self.inflight[key])
+                start = time.monotonic()
+                time.sleep(self.FETCH_SECONDS)
+                end = time.monotonic()
+                with self.events_lock:
+                    for key in (board, "all"):
+                        self.inflight[key] -= 1
+                    self.events.append((board, start, end))
+                return flows._Table(board, day, {"code": 0}, {"2330": ("2330",)})
+            return fetch
+
+        self._patches = [
+            mock.patch.object(flows, "_fetch_twse", fake_fetch("sii")),
+            mock.patch.object(flows, "_fetch_tpex", fake_fetch("otc")),
+            mock.patch.object(flows, "_REQUEST_SPACING_SECONDS", {"sii": self.SPACING, "otc": self.SPACING}),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        flows.clear_cache()
+        flows._last_request_done.clear()
+
+    def _run_threads(self, jobs):
+        barrier = threading.Barrier(len(jobs))
+        results = [None] * len(jobs)
+
+        def worker(i, board, day):
+            barrier.wait()
+            results[i] = flows._load_table(board, day, self.TODAY)
+
+        threads = [threading.Thread(target=worker, args=(i, b, d)) for i, (b, d) in enumerate(jobs)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        return results
+
+    def test_one_exchange_is_serialized_and_spaced(self):
+        jobs = [("sii", date(2026, 9, d)) for d in (7, 8, 9, 10)]
+        self._run_threads(jobs)
+        self.assertEqual(self.max_inflight["sii"], 1)
+        spans = sorted((s, e) for b, s, e in self.events if b == "sii")
+        self.assertEqual(len(spans), 4)
+        for (_, prev_end), (next_start, _) in zip(spans, spans[1:], strict=False):
+            self.assertGreaterEqual(next_start - prev_end, self.SPACING - 0.01)
+
+    def test_exchanges_do_not_block_each_other(self):
+        self._run_threads([("sii", date(2026, 9, 10)), ("otc", date(2026, 9, 10))])
+        self.assertEqual(self.max_inflight["all"], 2)
+
+    def test_concurrent_misses_for_one_table_fetch_it_once(self):
+        results = self._run_threads([("sii", date(2026, 9, 10))] * 3)
+        self.assertEqual(len(self.events), 1)
+        self.assertTrue(all(r is results[0] and r is not None for r in results))

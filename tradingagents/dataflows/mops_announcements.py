@@ -48,6 +48,7 @@ from .mops_common import BOARD_MARKET_NAME, MopsUnavailableError, http_post_json
 from .taiwan_common import (
     TAIPEI,
     norm_header,
+    resolve_as_of,
     split_taiwan_ticker,
     taipei_now as _now,  # test seam; the shared Taiwan-time clock
 )
@@ -404,20 +405,16 @@ def get_material_announcements(
     Raises :class:`NoMarketDataError` for non-Taiwan tickers without any
     request, :class:`MopsBoardMismatchError` when MOPS lists the company on
     the other board, and :class:`MopsUnavailableError` when the list cannot be
-    retrieved or validated. A failed detail request only marks that
-    announcement's detail unavailable.
+    retrieved or validated, and ``ValueError`` for a malformed or future
+    ``curr_date``. A failed detail request only marks that announcement's
+    detail unavailable.
     """
     code, board = split_taiwan_ticker(ticker, "MOPS material announcements")
-    try:
-        as_of = datetime.strptime(curr_date, "%Y-%m-%d").date()
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"curr_date must be yyyy-mm-dd, got {curr_date!r}") from exc
-    look_back_days = min(max(1, int(look_back_days)), _MAX_LOOK_BACK_DAYS)
-    detail_limit = min(max(0, int(detail_limit)), _MAX_DETAIL_LIMIT)
-
     now = _now().astimezone(TAIPEI)
     today = now.date()
-    live = as_of >= today
+    as_of, live = resolve_as_of(curr_date, today)
+    look_back_days = min(max(1, int(look_back_days)), _MAX_LOOK_BACK_DAYS)
+    detail_limit = min(max(0, int(detail_limit)), _MAX_DETAIL_LIMIT)
     if live:
         window_start = today - timedelta(days=look_back_days)
         window_end = today

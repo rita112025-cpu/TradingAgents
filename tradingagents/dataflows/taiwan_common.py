@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from .errors import NoMarketDataError
 from .market_profiles import MARKET_TAIWAN, resolve_market
@@ -30,6 +30,26 @@ def taipei_now() -> datetime:
     Adapters bind it as their own ``_now`` so tests patch one seam per module.
     """
     return datetime.now(TAIPEI)
+
+
+def resolve_as_of(curr_date: str, today: date) -> tuple[date, bool]:
+    """Parse ``curr_date`` and classify the run against Taiwan ``today``.
+
+    Returns ``(as_of, live)``: live when ``as_of`` is today, historical when it
+    is earlier. A malformed date or a date after today raises ``ValueError``:
+    data "as of" a day that has not arrived does not exist, and treating it as
+    live would label today's data with a later date.
+    """
+    try:
+        as_of = datetime.strptime(curr_date, "%Y-%m-%d").date()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"curr_date must be yyyy-mm-dd, got {curr_date!r}") from exc
+    if as_of > today:
+        raise ValueError(
+            f"curr_date {curr_date} is after today ({today}, Taiwan time); "
+            "future dates are not supported"
+        )
+    return as_of, as_of == today
 
 
 def norm_header(label: str) -> str:

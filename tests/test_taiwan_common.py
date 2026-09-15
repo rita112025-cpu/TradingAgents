@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import inspect
 import unittest
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 
@@ -57,3 +57,24 @@ def test_module_does_not_depend_on_a_data_source():
     # TWSE / TPEx are the boards themselves and may be named; MOPS is a data
     # source and must not leak into the market helpers.
     assert "mops" not in inspect.getsource(taiwan_common).lower()
+
+
+@pytest.mark.unit
+class ResolveAsOfTests(unittest.TestCase):
+    TODAY = date(2026, 9, 15)
+
+    def test_past_is_historical_and_today_is_live(self):
+        self.assertEqual(taiwan_common.resolve_as_of("2026-09-14", self.TODAY), (date(2026, 9, 14), False))
+        self.assertEqual(taiwan_common.resolve_as_of("2026-09-15", self.TODAY), (date(2026, 9, 15), True))
+
+    def test_future_date_is_refused(self):
+        for curr_date in ("2026-09-16", "2026-10-01", "2030-01-01"):
+            with self.subTest(curr_date=curr_date), self.assertRaises(ValueError) as ctx:
+                taiwan_common.resolve_as_of(curr_date, self.TODAY)
+            self.assertIn("future dates are not supported", str(ctx.exception))
+
+    def test_malformed_date_is_refused(self):
+        for curr_date in ("2026/09/14", "20260914", "", None):
+            with self.subTest(curr_date=curr_date), self.assertRaises(ValueError) as ctx:
+                taiwan_common.resolve_as_of(curr_date, self.TODAY)
+            self.assertIn("curr_date must be yyyy-mm-dd", str(ctx.exception))

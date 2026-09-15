@@ -660,3 +660,15 @@ class NewsAnalystWiringTests(unittest.TestCase):
         for name in ("get_news", "get_global_news", "get_insider_transactions",
                      "get_macro_indicators", "get_prediction_markets"):
             self.assertIn(name, nodes["news"].tools_by_name)
+
+
+# --- hardening: future dates ----------------------------------------------------------------
+
+class FutureDateTests(_Base):
+    def test_future_curr_date_is_refused_without_requests(self):
+        self.NOW = "2026-09-15 12:00:00"
+        self.serve(_Ann("2026-09-10 10:00:00", "x"))
+        with self.assertRaises(ValueError) as ctx:
+            self.run_tool("2330.TW", "2026-10-01")
+        self.assertIn("future dates are not supported", str(ctx.exception))
+        self.assertEqual(self.mops.calls, [])

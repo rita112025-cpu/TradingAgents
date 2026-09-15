@@ -637,3 +637,53 @@ class FundamentalsAnalystWiringTests(unittest.TestCase):
         from tradingagents.default_config import DEFAULT_CONFIG
         self.assertEqual(DEFAULT_CONFIG["data_vendors"]["fundamental_data"], "yfinance")
         self.assertEqual(DEFAULT_CONFIG["data_vendors"]["taiwan_market_data"], "mops")
+
+
+# --- hardening: look-back cap, future dates, cache of still-filling months -----------------
+
+class HardeningTests(_Base):
+    def test_look_back_months_is_capped(self):
+        with mock.patch.object(mops, "_http_get", lambda url: self.server.requests.append(url)
+                               or _table([_TSMC])):
+            mops.get_monthly_revenue("2330.TW", _TODAY, look_back_months=500)
+        self.assertEqual(len(self.server.requests), mops._MAX_LOOK_BACK_MONTHS)
+        self.assertEqual(mops._MAX_LOOK_BACK_MONTHS, 24)
+
+    def test_future_curr_date_is_refused_without_requests(self):
+        with self.assertRaises(ValueError) as ctx:
+            mops.get_monthly_revenue("2330.TW", "2026-10-01", look_back_months=1)
+        self.assertIn("future dates are not supported", str(ctx.exception))
+        self.assertEqual(self.server.requests, [])
+        out = interface.route_to_vendor("get_monthly_revenue", "2330.TW", "2026-10-01", 1)
+        self.assertTrue(out.startswith("DATA_UNAVAILABLE:"), out)
+        self.assertIn("future dates are not supported", out)
+
+    def test_month_still_receiving_filings_is_never_cached(self):
+        # On 09-03 August is still filling in: 2330 has not filed yet.
+        self.server.add("sii", 2026, 8, _table([_NEG]))
+        with mock.patch.object(mops, "_now", lambda: _taipei_noon("2026-09-03")), \
+                self.assertRaises(NoMarketDataError):
+            mops.get_monthly_revenue("2330.TW", "2026-09-03", look_back_months=1)
+        # By 09-10 it has; the same process must see the new filing.
+        self.server.add("sii", 2026, 8, _table([_NEG, _TSMC]))
+        with mock.patch.object(mops, "_now", lambda: _taipei_noon("2026-09-10")):
+            out = mops.get_monthly_revenue("2330.TW", "2026-09-10", look_back_months=1)
+        self.assertIn("| 2026-08 | 514,805,337 |", out)
+        self.assertEqual(len(self.server.requests), 2)
+
+    def test_complete_month_is_cached_until_ttl(self):
+        clock = [0.0]
+        self.server.add("sii", 2026, 7, _table([_TSMC]))
+        with mock.patch.object(mops, "_monotonic", lambda: clock[0]):
+            for _ in range(2):   # July is past its 08-16 safety date on 09-15
+                mops.get_monthly_revenue("2330.TW", "2026-08-31", look_back_months=1)
+            self.assertEqual(len(self.server.requests), 1)
+            clock[0] += mops._COMPLETE_TABLE_TTL_SECONDS + 1
+            mops.get_monthly_revenue("2330.TW", "2026-08-31", look_back_months=1)
+        self.assertEqual(len(self.server.requests), 2)
+
+    def test_cache_is_bounded(self):
+        with mock.patch.object(mops, "_TABLE_CACHE_MAX", 2), \
+                mock.patch.object(mops, "_http_get", lambda url: _table([_TSMC])):
+            mops.get_monthly_revenue("2330.TW", "2026-08-31", look_back_months=4)
+        self.assertEqual(len(mops._table_cache), 2)
